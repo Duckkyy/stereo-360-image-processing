@@ -1,32 +1,24 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
-#include <opencv2/cudawarping.hpp>
-#include <cfloat>
-#include <opencv2/cudawarping.hpp>
-#include <opencv2/core/cuda/common.hpp>
-#include <opencv2/core/cuda/border_interpolate.hpp>
-#include <opencv2/core/cuda/vec_traits.hpp>
-#include <opencv2/core/cuda/vec_math.hpp>
-#include <string>
 #include <cmath>
-#include <chrono>  // for high_resolution_clock
-
-#include "helper_math.h"
-
-using namespace std;
+#include <cuda_runtime.h>
+#include <string>
 
 #define PI 3.14159265358979323846
 
+using namespace std;
+
+// Helper math functions
 __device__ void faceDirection(int faceIdx, float u, float v, float3& dir) {
     float x = 2.0f * u - 1.0f;
     float y = 2.0f * v - 1.0f;
     switch (faceIdx) {
-        case 0: dir = make_float3(1, -y, -x); break;   // +X
-        case 1: dir = make_float3(-1, -y, x); break;   // -X
-        case 2: dir = make_float3(x, 1, y); break;     // +Y
-        case 3: dir = make_float3(x, -1, -y); break;   // -Y
-        case 4: dir = make_float3(x, -y, 1); break;    // +Z
-        case 5: dir = make_float3(-x, -y, -1); break;  // -Z
+        case 0: dir = make_float3(1, -y, -x); break;    // +X (right)
+        case 1: dir = make_float3(-1, -y, x); break;    // -X (left)
+        case 2: dir = make_float3(x, 1, y); break;      // +Y (top)
+        case 3: dir = make_float3(x, -1, -y); break;    // -Y (bottom)
+        case 4: dir = make_float3(x, -y, 1); break;     // +Z (front)
+        case 5: dir = make_float3(-x, -y, -1); break;   // -Z (back)
     }
     float len = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
     dir.x /= len; dir.y /= len; dir.z /= len;
@@ -41,6 +33,26 @@ __device__ void dirToEquirect(float3 dir, int width, int height, int& u, int& v)
     v = int(vf * height);
     u = min(max(u, 0), width - 1);
     v = min(max(v, 0), height - 1);
+}
+
+__device__ void rotateCoords(int& x, int& y, int faceSize, int rotation) {
+    int tx = x, ty = y;
+    switch (rotation) {
+        case 90:
+            x = ty;
+            y = faceSize - 1 - tx;
+            break;
+        case 180:
+            x = faceSize - 1 - tx;
+            y = faceSize - 1 - ty;
+            break;
+        case 270:
+            x = faceSize - 1 - ty;
+            y = tx;
+            break;
+        default:
+            break;
+    }
 }
 
 __global__ void EquirectToCubeKernel(uchar3* input, uchar3* output, int eqWidth, int eqHeight, int faceSize) {
@@ -58,17 +70,19 @@ __global__ void EquirectToCubeKernel(uchar3* input, uchar3* output, int eqWidth,
     dirToEquirect(dir, eqWidth, eqHeight, uE, vE);
     uchar3 color = input[vE * eqWidth + uE];
 
-    int outX = 0, outY = 0;
+    int outX = 0, outY = 0, rot = 0;
     switch (face) {
-        case 0: outX = faceSize;      outY = 0; break;       // +X
-        case 1: outX = 0;             outY = faceSize; break; // -X
-        case 2: outX = 0;             outY = 0; break;       // +Y
-        case 3: outX = faceSize * 2;  outY = 0; break;       // -Y
-        case 4: outX = faceSize * 2;  outY = faceSize; break;// +Z
-        case 5: outX = faceSize;      outY = faceSize; break;// -Z
+        case 0: outX = 2 * faceSize; outY = faceSize; rot = 270; break; // +X
+        case 1: outX = 0;            outY = faceSize; rot = 90;  break; // -X
+        case 2: outX = faceSize;     outY = 0;         rot = 180; break; // +Y (top)
+        case 3: outX = faceSize;     outY = 2 * faceSize; rot = 0; break; // -Y (bottom)
+        case 4: outX = faceSize;     outY = faceSize;   rot = 0;  break; // +Z
+        case 5: outX = 3 * faceSize; outY = faceSize;   rot = 180; break; // -Z
     }
 
-    int outIdx = (outY + y) * faceSize * 3 + (outX + x);
+    int tx = x, ty = y;
+    rotateCoords(tx, ty, faceSize, rot);
+    int outIdx = (outY + ty) * faceSize * 4 + (outX + tx);
     output[outIdx] = color;
 }
 
@@ -89,7 +103,7 @@ int main(int argc, char** argv) {
     int faceSize = eqWidth / 4;
 
     size_t inputSize = eqWidth * eqHeight * sizeof(uchar3);
-    size_t outputSize = (faceSize * 3) * (faceSize * 2) * sizeof(uchar3);
+    size_t outputSize = (faceSize * 4) * (faceSize * 3) * sizeof(uchar3);
 
     uchar3* d_input;
     uchar3* d_output;
@@ -102,7 +116,7 @@ int main(int argc, char** argv) {
     EquirectToCubeKernel<<<grid, block>>>(d_input, d_output, eqWidth, eqHeight, faceSize);
     cudaDeviceSynchronize();
 
-    cv::Mat result(faceSize * 2, faceSize * 3, CV_8UC3);
+    cv::Mat result(faceSize * 3, faceSize * 4, CV_8UC3);
     cudaMemcpy(result.ptr<uchar3>(), d_output, outputSize, cudaMemcpyDeviceToHost);
 
     cv::imwrite("cube_map_output.jpg", result);
@@ -113,4 +127,3 @@ int main(int argc, char** argv) {
     std::cout << "Saved: cube_map_output.jpg" << std::endl;
     return 0;
 }
-
