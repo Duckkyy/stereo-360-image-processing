@@ -1,129 +1,113 @@
-#include <iostream>
-#include <opencv2/opencv.hpp>
 #include <cmath>
-#include <cuda_runtime.h>
+#include <cstdio>
 #include <string>
+#include <cuda_runtime.h>
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
-#define PI 3.14159265358979323846
-
-using namespace std;
-
-// Helper math functions
-__device__ void faceDirection(int faceIdx, float u, float v, float3& dir) {
+__device__ float3 direction_from_face_coords(int face, float u, float v) {
+    float3 dir;
     float x = 2.0f * u - 1.0f;
     float y = 2.0f * v - 1.0f;
-    switch (faceIdx) {
-        case 0: dir = make_float3(1, -y, -x); break;    // +X (right)
-        case 1: dir = make_float3(-1, -y, x); break;    // -X (left)
-        case 2: dir = make_float3(x, 1, y); break;      // +Y (top)
-        case 3: dir = make_float3(x, -1, -y); break;    // -Y (bottom)
-        case 4: dir = make_float3(x, -y, 1); break;     // +Z (front)
-        case 5: dir = make_float3(-x, -y, -1); break;   // -Z (back)
+
+    switch (face) {
+        case 0: dir = make_float3(1.0f, -y, -x); break;  // +X
+        case 1: dir = make_float3(-1.0f, -y, x); break;  // -X
+        case 2: dir = make_float3(x, 1.0f, y); break;    // +Y
+        case 3: dir = make_float3(x, -1.0f, -y); break;  // -Y
+        case 4: dir = make_float3(x, -y, 1.0f); break;   // +Z
+        case 5: dir = make_float3(-x, -y, -1.0f); break; // -Z
     }
-    float len = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+
+    float len = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
     dir.x /= len; dir.y /= len; dir.z /= len;
+    return dir;
 }
 
-__device__ void dirToEquirect(float3 dir, int width, int height, int& u, int& v) {
-    float theta = atan2f(dir.x, -dir.z);
-    float phi = asinf(dir.y);
-    float uf = (theta + PI) / (2 * PI);
-    float vf = (phi + PI / 2) / PI;
-    u = int(uf * width);
-    v = int(vf * height);
-    u = min(max(u, 0), width - 1);
-    v = min(max(v, 0), height - 1);
+__device__ void dir_to_uv(float3 dir, float &u, float &v) {
+    float theta = atan2f(dir.y, dir.x);
+    float phi = acosf(dir.z);
+    u = (theta + M_PI) / (2.0f * M_PI);
+    v = phi / M_PI;
 }
 
-__device__ void rotateCoords(int& x, int& y, int faceSize, int rotation) {
-    int tx = x, ty = y;
-    switch (rotation) {
-        case 90:
-            x = ty;
-            y = faceSize - 1 - tx;
-            break;
-        case 180:
-            x = faceSize - 1 - tx;
-            y = faceSize - 1 - ty;
-            break;
-        case 270:
-            x = faceSize - 1 - ty;
-            y = tx;
-            break;
-        default:
-            break;
-    }
-}
-
-__global__ void EquirectToCubeKernel(uchar3* input, uchar3* output, int eqWidth, int eqHeight, int faceSize) {
-    int face = blockIdx.z;
+__global__ void equirect_to_cube_kernel(
+    const unsigned char* input,
+    int inWidth, int inHeight,
+    unsigned char* output,
+    int faceSize,
+    int face
+) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= faceSize || y >= faceSize || face >= 6) return;
+    if (x >= faceSize || y >= faceSize) return;
 
     float u = (x + 0.5f) / faceSize;
     float v = (y + 0.5f) / faceSize;
-    float3 dir;
-    faceDirection(face, u, v, dir);
 
-    int uE, vE;
-    dirToEquirect(dir, eqWidth, eqHeight, uE, vE);
-    uchar3 color = input[vE * eqWidth + uE];
+    float3 dir = direction_from_face_coords(face, u, v);
 
-    int outX = 0, outY = 0, rot = 0;
-    switch (face) {
-        case 0: outX = 2 * faceSize; outY = faceSize; rot = 270; break; // +X
-        case 1: outX = 0;            outY = faceSize; rot = 90;  break; // -X
-        case 2: outX = faceSize;     outY = 0;         rot = 180; break; // +Y (top)
-        case 3: outX = faceSize;     outY = 2 * faceSize; rot = 0; break; // -Y (bottom)
-        case 4: outX = faceSize;     outY = faceSize;   rot = 0;  break; // +Z
-        case 5: outX = 3 * faceSize; outY = faceSize;   rot = 180; break; // -Z
-    }
+    float uf, vf;
+    dir_to_uv(dir, uf, vf);
+    int px = min((int)(uf * inWidth), inWidth - 1);
+    int py = min((int)(vf * inHeight), inHeight - 1);
 
-    int tx = x, ty = y;
-    rotateCoords(tx, ty, faceSize, rot);
-    int outIdx = (outY + ty) * faceSize * 4 + (outX + tx);
-    output[outIdx] = color;
+    int input_idx = (py * inWidth + px) * 3;
+    int output_idx = (y * faceSize + x) * 3;
+
+    output[output_idx + 0] = input[input_idx + 0];
+    output[output_idx + 1] = input[input_idx + 1];
+    output[output_idx + 2] = input[input_idx + 2];
+}
+
+void convert_face(const unsigned char* inputImage, int inW, int inH, int faceSize, int face, const std::string& filename) {
+    unsigned char* d_input, *d_output, *h_output;
+    size_t inSize = inW * inH * 3;
+    size_t faceBytes = faceSize * faceSize * 3;
+
+    cudaMalloc(&d_input, inSize);
+    cudaMemcpy(d_input, inputImage, inSize, cudaMemcpyHostToDevice);
+
+    cudaMalloc(&d_output, faceBytes);
+    h_output = new unsigned char[faceBytes];
+
+    dim3 block(16, 16);
+    dim3 grid((faceSize + 15) / 16, (faceSize + 15) / 16);
+    equirect_to_cube_kernel<<<grid, block>>>(d_input, inW, inH, d_output, faceSize, face);
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(h_output, d_output, faceBytes, cudaMemcpyDeviceToHost);
+
+    stbi_write_png(filename.c_str(), faceSize, faceSize, 3, h_output, faceSize * 3);
+
+    cudaFree(d_input);
+    cudaFree(d_output);
+    delete[] h_output;
 }
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cout << "Usage: ./equirect_to_cube <equirectangular_image>" << std::endl;
+        printf("Usage: %s <input_image>\n", argv[0]);
         return -1;
     }
 
-    cv::Mat img = cv::imread(argv[1], cv::IMREAD_COLOR);
-    if (img.empty()) {
-        std::cerr << "Error loading image!" << std::endl;
+    int width, height, channels;
+    unsigned char* inputImage = stbi_load(argv[1], &width, &height, &channels, 3);
+    if (!inputImage) {
+        fprintf(stderr, "Failed to load image\n");
         return -1;
     }
 
-    int eqWidth = img.cols;
-    int eqHeight = img.rows;
-    int faceSize = eqWidth / 4;
+    int faceSize = width / 4;
 
-    size_t inputSize = eqWidth * eqHeight * sizeof(uchar3);
-    size_t outputSize = (faceSize * 4) * (faceSize * 3) * sizeof(uchar3);
+    const char* face_names[6] = { "XPOS", "XNEG", "YPOS", "YNEG", "ZPOS", "ZNEG" };
+    for (int i = 0; i < 6; ++i) {
+        std::string fname = "CUBE_" + std::string(face_names[i]) + ".png";
+        convert_face(inputImage, width, height, faceSize, i, fname);
+    }
 
-    uchar3* d_input;
-    uchar3* d_output;
-    cudaMalloc(&d_input, inputSize);
-    cudaMalloc(&d_output, outputSize);
-    cudaMemcpy(d_input, img.ptr<uchar3>(), inputSize, cudaMemcpyHostToDevice);
-
-    dim3 block(16, 16);
-    dim3 grid((faceSize + 15) / 16, (faceSize + 15) / 16, 6);
-    EquirectToCubeKernel<<<grid, block>>>(d_input, d_output, eqWidth, eqHeight, faceSize);
-    cudaDeviceSynchronize();
-
-    cv::Mat result(faceSize * 3, faceSize * 4, CV_8UC3);
-    cudaMemcpy(result.ptr<uchar3>(), d_output, outputSize, cudaMemcpyDeviceToHost);
-
-    cv::imwrite("cube_map_output.jpg", result);
-
-    cudaFree(d_input);
-    cudaFree(d_output);
-
-    std::cout << "Saved: cube_map_output.jpg" << std::endl;
+    stbi_image_free(inputImage);
     return 0;
 }
