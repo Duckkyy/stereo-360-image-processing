@@ -1,11 +1,16 @@
-#include <cmath>
-#include <cstdio>
+#include <iostream>
+#include <opencv2/opencv.hpp>
+#include <opencv2/cudawarping.hpp>
+#include <cfloat>
+#include <opencv2/cudawarping.hpp>
+#include <opencv2/core/cuda/common.hpp>
+#include <opencv2/core/cuda/border_interpolate.hpp>
+#include <opencv2/core/cuda/vec_traits.hpp>
+#include <opencv2/core/cuda/vec_math.hpp>
 #include <string>
-#include <cuda_runtime.h>
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
+#include <cmath>
+#include <chrono>  // for high_resolution_clock
+
 
 __device__ float3 direction_from_face_coords(int face, float u, float v) {
     float3 dir;
