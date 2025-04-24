@@ -1,11 +1,19 @@
-// equirect_to_cube.cu
-// CUDA + OpenCV compatible .cu file to convert an equirectangular image into a cube map layout
-
-#include <cuda_runtime.h>
-#include <device_launch_parameters.h>
-#include <math.h>
-#include <opencv2/opencv.hpp>
 #include <iostream>
+#include <opencv2/opencv.hpp>
+#include <opencv2/cudawarping.hpp>
+#include <cfloat>
+#include <opencv2/cudawarping.hpp>
+#include <opencv2/core/cuda/common.hpp>
+#include <opencv2/core/cuda/border_interpolate.hpp>
+#include <opencv2/core/cuda/vec_traits.hpp>
+#include <opencv2/core/cuda/vec_math.hpp>
+#include <string>
+#include <cmath>
+#include <chrono>  // for high_resolution_clock
+
+#include "helper_math.h"
+
+using namespace std;
 
 #define PI 3.14159265358979323846
 
